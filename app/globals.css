@@ -970,6 +970,26 @@ input[type="range"] {
   margin-top: 16px;
 }
 
+.databasePill {
+  max-width: 520px;
+  margin-top: 14px;
+  border-radius: 999px;
+  padding: 9px 12px;
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.databasePill.connected {
+  color: #064d3b;
+  background: #ddf4eb;
+}
+
+.databasePill.offline {
+  color: #644500;
+  background: #fff1d7;
+}
+
 .fileDrop,
 .privateDrop {
   border: 1px dashed rgba(15, 122, 95, 0.48);

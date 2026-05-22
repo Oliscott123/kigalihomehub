@@ -38,6 +38,15 @@ const CUSTOM_LISTINGS_KEY = "kigali-home-hub-custom-listings";
 const STATUS_KEY = "kigali-home-hub-listing-status";
 const OWNER_WHATSAPP_KEY = "kigali-home-hub-owner-whatsapp";
 const PRIVATE_IMAGES_KEY = "kigali-home-hub-private-images";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const DATABASE_READY = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+
+type SupabaseListingRow = Omit<Listing, "gallery" | "status"> & {
+  gallery: string[];
+  status: Listing["status"];
+  created_at?: string;
+};
 
 const starterListings: Listing[] = [
   {
@@ -183,6 +192,9 @@ export default function Home() {
     return localStorage.getItem(OWNER_WHATSAPP_KEY) ?? "25078";
   });
   const [ownerUnlocked, setOwnerUnlocked] = useState(false);
+  const [databaseStatus, setDatabaseStatus] = useState(
+    DATABASE_READY ? "Connecting to database..." : "Database not connected yet"
+  );
 
   const listings = useMemo(() => {
     return [...customListings, ...starterListings].map((listing) => ({
@@ -211,15 +223,62 @@ export default function Home() {
     );
   }
 
-  function addListing(listing: Listing) {
-    setCustomListings((current) => [listing, ...current]);
-    setSelectedId(listing.id);
+  async function addListing(listing: Listing) {
+    const savedListing = await saveListingToDatabase(listing);
+
+    setCustomListings((current) => [savedListing, ...current]);
+    setSelectedId(savedListing.id);
     setMode("match");
+    setDatabaseStatus(
+      DATABASE_READY
+        ? "Saved online. Other devices can see it."
+        : "Saved on this browser only. Add Supabase keys to sync devices."
+    );
   }
 
-  function updateListingStatus(id: number, status: Listing["status"]) {
+  async function updateListingStatus(id: number, status: Listing["status"]) {
     setStatusOverrides((current) => ({ ...current, [String(id)]: status }));
+    setCustomListings((current) =>
+      current.map((listing) => (listing.id === id ? { ...listing, status } : listing))
+    );
+
+    const savedOnline = await updateListingStatusInDatabase(id, status);
+    setDatabaseStatus(
+      savedOnline
+        ? "Status updated online."
+        : "Status saved locally. Database is not connected or this is a starter listing."
+    );
   }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadListings() {
+      const onlineListings = await fetchListingsFromDatabase();
+
+      if (cancelled) {
+        return;
+      }
+
+      if (onlineListings) {
+        setCustomListings(onlineListings);
+        setDatabaseStatus("Database connected. Listings sync across devices.");
+        return;
+      }
+
+      setDatabaseStatus(
+        DATABASE_READY
+          ? "Database connection failed. Using local browser storage."
+          : "Database not connected. Using local browser storage."
+      );
+    }
+
+    loadListings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(CUSTOM_LISTINGS_KEY, JSON.stringify(customListings));
@@ -374,6 +433,7 @@ export default function Home() {
             listings={listings}
             onAddListing={addListing}
             onUpdateListingStatus={updateListingStatus}
+            databaseStatus={databaseStatus}
             ownerWhatsApp={ownerWhatsApp}
             onOwnerWhatsAppChange={setOwnerWhatsApp}
             onLock={() => {
@@ -722,13 +782,15 @@ function Portal({
   listings,
   onAddListing,
   onUpdateListingStatus,
+  databaseStatus,
   ownerWhatsApp,
   onOwnerWhatsAppChange,
   onLock
 }: {
   listings: Listing[];
-  onAddListing: (listing: Listing) => void;
-  onUpdateListingStatus: (id: number, status: Listing["status"]) => void;
+  onAddListing: (listing: Listing) => Promise<void> | void;
+  onUpdateListingStatus: (id: number, status: Listing["status"]) => Promise<void> | void;
+  databaseStatus: string;
   ownerWhatsApp: string;
   onOwnerWhatsAppChange: (phone: string) => void;
   onLock: () => void;
@@ -745,6 +807,7 @@ function Portal({
         </button>
       </div>
       <DashboardOverview
+        databaseStatus={databaseStatus}
         ownerWhatsApp={ownerWhatsApp}
         onOwnerWhatsAppChange={onOwnerWhatsAppChange}
       />
@@ -789,9 +852,11 @@ function Portal({
 }
 
 function DashboardOverview({
+  databaseStatus,
   ownerWhatsApp,
   onOwnerWhatsAppChange
 }: {
+  databaseStatus: string;
   ownerWhatsApp: string;
   onOwnerWhatsAppChange: (phone: string) => void;
 }) {
@@ -804,6 +869,9 @@ function DashboardOverview({
           <Metric label="Active houses" value="12" />
           <Metric label="Photo views" value="8,240" />
           <Metric label="WhatsApp leads" value="134" />
+        </div>
+        <div className={`databasePill ${DATABASE_READY ? "connected" : "offline"}`}>
+          {databaseStatus}
         </div>
         <label className="ownerWhatsApp">
           Your WhatsApp number
@@ -931,7 +999,7 @@ function UploadListing({
   onAddListing,
   ownerWhatsApp
 }: {
-  onAddListing: (listing: Listing) => void;
+  onAddListing: (listing: Listing) => Promise<void> | void;
   ownerWhatsApp: string;
 }) {
   const [title, setTitle] = useState("New apartment with balcony");
@@ -953,12 +1021,12 @@ function UploadListing({
     setPhotos(await readFilesAsDataUrls(files));
   }
 
-  function publishListing() {
+  async function publishListing() {
     const fallbackImage =
       "https://images.unsplash.com/photo-1564013799919-ab600027ffc6?auto=format&fit=crop&w=1200&q=80";
     const gallery = photos.length > 0 ? photos : [fallbackImage];
 
-    onAddListing({
+    await onAddListing({
       id: Date.now(),
       title,
       area,
@@ -1094,6 +1162,114 @@ function readFilesAsDataUrls(files: FileList): Promise<string[]> {
         })
     )
   );
+}
+
+function databaseHeaders() {
+  return {
+    apikey: SUPABASE_ANON_KEY ?? "",
+    Authorization: `Bearer ${SUPABASE_ANON_KEY ?? ""}`,
+    "Content-Type": "application/json"
+  };
+}
+
+function toDatabaseRow(listing: Listing): Omit<SupabaseListingRow, "id" | "created_at"> {
+  return {
+    title: listing.title,
+    area: listing.area,
+    address: listing.address,
+    price: listing.price,
+    deposit: listing.deposit,
+    agency: listing.agency,
+    utilities: listing.utilities,
+    rooms: listing.rooms,
+    lifestyle: listing.lifestyle,
+    safety: listing.safety,
+    noise: listing.noise,
+    match: listing.match,
+    verified: listing.verified,
+    video: listing.video,
+    deal: listing.deal,
+    image: listing.image,
+    gallery: listing.gallery,
+    agent: listing.agent,
+    phone: listing.phone,
+    rating: listing.rating,
+    response: listing.response,
+    distance: listing.distance,
+    views: listing.views,
+    status: listing.status
+  };
+}
+
+async function fetchListingsFromDatabase(): Promise<Listing[] | null> {
+  if (!DATABASE_READY) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/listings?select=*&order=created_at.desc`,
+      { headers: databaseHeaders() }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return (await response.json()) as Listing[];
+  } catch {
+    return null;
+  }
+}
+
+async function saveListingToDatabase(listing: Listing): Promise<Listing> {
+  if (!DATABASE_READY) {
+    return listing;
+  }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/listings?select=*`, {
+      method: "POST",
+      headers: {
+        ...databaseHeaders(),
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify(toDatabaseRow(listing))
+    });
+
+    if (!response.ok) {
+      return listing;
+    }
+
+    const [savedListing] = (await response.json()) as Listing[];
+    return savedListing ?? listing;
+  } catch {
+    return listing;
+  }
+}
+
+async function updateListingStatusInDatabase(
+  id: number,
+  status: Listing["status"]
+): Promise<boolean> {
+  if (!DATABASE_READY) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/listings?id=eq.${id}`, {
+      method: "PATCH",
+      headers: {
+        ...databaseHeaders(),
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({ status })
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
