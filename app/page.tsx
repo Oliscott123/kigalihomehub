@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Listing = {
   id: number;
@@ -27,7 +27,17 @@ type Listing = {
   response: string;
   distance: string;
   views: number;
+  status: "available" | "booked" | "occupied";
 };
+
+type StatusMap = Record<string, Listing["status"]>;
+
+const OWNER_PASSWORD_HASH =
+  "643a3b0d15972578355e0fd2cfdf5e130d8667f0de165747d3d56925e80ae821";
+const CUSTOM_LISTINGS_KEY = "kigali-home-hub-custom-listings";
+const STATUS_KEY = "kigali-home-hub-listing-status";
+const OWNER_WHATSAPP_KEY = "kigali-home-hub-owner-whatsapp";
+const PRIVATE_IMAGES_KEY = "kigali-home-hub-private-images";
 
 const starterListings: Listing[] = [
   {
@@ -59,7 +69,8 @@ const starterListings: Listing[] = [
     rating: 4.9,
     response: "12 min",
     distance: "7 min to shops, 11 min to transport",
-    views: 1820
+    views: 1820,
+    status: "available"
   },
   {
     id: 2,
@@ -90,7 +101,8 @@ const starterListings: Listing[] = [
     rating: 4.7,
     response: "21 min",
     distance: "4 min to school, 9 min to supermarket",
-    views: 1344
+    views: 1344,
+    status: "booked"
   },
   {
     id: 3,
@@ -121,7 +133,8 @@ const starterListings: Listing[] = [
     rating: 4.4,
     response: "38 min",
     distance: "3 min to cafes, 6 min to buses",
-    views: 956
+    views: 956,
+    status: "occupied"
   }
 ];
 
@@ -132,7 +145,28 @@ const messages = [
 ];
 
 export default function Home() {
-  const [listings, setListings] = useState<Listing[]>(starterListings);
+  const [customListings, setCustomListings] = useState<Listing[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    try {
+      return JSON.parse(localStorage.getItem(CUSTOM_LISTINGS_KEY) ?? "[]") as Listing[];
+    } catch {
+      return [];
+    }
+  });
+  const [statusOverrides, setStatusOverrides] = useState<StatusMap>(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    try {
+      return JSON.parse(localStorage.getItem(STATUS_KEY) ?? "{}") as StatusMap;
+    } catch {
+      return {};
+    }
+  });
   const [selectedId, setSelectedId] = useState(1);
   const [budget, setBudget] = useState(650);
   const [rooms, setRooms] = useState(2);
@@ -141,8 +175,21 @@ export default function Home() {
   const [alertOn, setAlertOn] = useState(true);
   const [aiOpen, setAiOpen] = useState(false);
   const [bookingOpen, setBookingOpen] = useState(false);
-  const [ownerWhatsApp, setOwnerWhatsApp] = useState("25078");
+  const [ownerWhatsApp, setOwnerWhatsApp] = useState(() => {
+    if (typeof window === "undefined") {
+      return "25078";
+    }
+
+    return localStorage.getItem(OWNER_WHATSAPP_KEY) ?? "25078";
+  });
   const [ownerUnlocked, setOwnerUnlocked] = useState(false);
+
+  const listings = useMemo(() => {
+    return [...customListings, ...starterListings].map((listing) => ({
+      ...listing,
+      status: statusOverrides[String(listing.id)] ?? listing.status
+    }));
+  }, [customListings, statusOverrides]);
 
   const selected = listings.find((listing) => listing.id === selectedId) ?? listings[0];
 
@@ -165,10 +212,26 @@ export default function Home() {
   }
 
   function addListing(listing: Listing) {
-    setListings((current) => [listing, ...current]);
+    setCustomListings((current) => [listing, ...current]);
     setSelectedId(listing.id);
     setMode("match");
   }
+
+  function updateListingStatus(id: number, status: Listing["status"]) {
+    setStatusOverrides((current) => ({ ...current, [String(id)]: status }));
+  }
+
+  useEffect(() => {
+    localStorage.setItem(CUSTOM_LISTINGS_KEY, JSON.stringify(customListings));
+  }, [customListings]);
+
+  useEffect(() => {
+    localStorage.setItem(STATUS_KEY, JSON.stringify(statusOverrides));
+  }, [statusOverrides]);
+
+  useEffect(() => {
+    localStorage.setItem(OWNER_WHATSAPP_KEY, ownerWhatsApp);
+  }, [ownerWhatsApp]);
 
   return (
     <main className="shell">
@@ -201,7 +264,7 @@ export default function Home() {
           onClick={() => setMode("portal")}
           aria-label="Open private owner dashboard"
         >
-          Private dashboard
+          <span className="ownerIcon" aria-hidden="true" />
         </button>
 
         <section className="filters" aria-label="Smart matching preferences">
@@ -281,6 +344,7 @@ export default function Home() {
                         <strong>{Math.round(listing.score)}%</strong>
                       </div>
                       <div className="badges">
+                        <span className={`statusBadge ${listing.status}`}>{listing.status}</span>
                         {listing.verified && <span>Verified</span>}
                         {listing.video && <span>Video tour</span>}
                         <span>{listing.noise}</span>
@@ -307,7 +371,9 @@ export default function Home() {
         )}
         {mode === "portal" && ownerUnlocked && (
           <Portal
+            listings={listings}
             onAddListing={addListing}
+            onUpdateListingStatus={updateListingStatus}
             ownerWhatsApp={ownerWhatsApp}
             onOwnerWhatsAppChange={setOwnerWhatsApp}
             onLock={() => {
@@ -367,6 +433,7 @@ function ListingDetail({
       <div className="heroPhoto">
         <img src={listing.image} alt={`${listing.title} interior`} />
         <div className="photoOverlay">
+          <span>{listing.status}</span>
           <span>{listing.verified ? "Verified photos" : "Needs verification"}</span>
           <span>{listing.video ? "Short video available" : "Photos only"}</span>
         </div>
@@ -600,14 +667,19 @@ function OwnerLogin({ onUnlock, onBack }: { onUnlock: () => void; onBack: () => 
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
 
-  function unlockDashboard() {
-    if (pin === "1234") {
+  async function unlockDashboard() {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pin));
+    const hashedPin = Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+
+    if (hashedPin === OWNER_PASSWORD_HASH) {
       setError("");
       onUnlock();
       return;
     }
 
-    setError("Wrong PIN. Try 1234 for this demo.");
+    setError("Wrong password. Use the private owner password.");
   }
 
   return (
@@ -615,11 +687,11 @@ function OwnerLogin({ onUnlock, onBack }: { onUnlock: () => void; onBack: () => 
       <div>
         <p className="eyebrow">Private owner access</p>
         <h2>This dashboard is hidden from renters.</h2>
-        <p>Enter your owner PIN to manage uploads, private images, and WhatsApp settings.</p>
+        <p>Enter your encrypted owner password to manage uploads, private images, WhatsApp, agency fees, and listing status.</p>
       </div>
       <div className="ownerLoginForm">
         <label>
-          Owner PIN
+          Owner password
           <input
             type="password"
             value={pin}
@@ -629,7 +701,7 @@ function OwnerLogin({ onUnlock, onBack }: { onUnlock: () => void; onBack: () => 
                 unlockDashboard();
               }
             }}
-            placeholder="1234"
+            placeholder="Enter password"
           />
         </label>
         {error && <span>{error}</span>}
@@ -647,12 +719,16 @@ function OwnerLogin({ onUnlock, onBack }: { onUnlock: () => void; onBack: () => 
 }
 
 function Portal({
+  listings,
   onAddListing,
+  onUpdateListingStatus,
   ownerWhatsApp,
   onOwnerWhatsAppChange,
   onLock
 }: {
+  listings: Listing[];
   onAddListing: (listing: Listing) => void;
+  onUpdateListingStatus: (id: number, status: Listing["status"]) => void;
   ownerWhatsApp: string;
   onOwnerWhatsAppChange: (phone: string) => void;
   onLock: () => void;
@@ -674,6 +750,7 @@ function Portal({
       />
       <PrivateImageVault />
       <UploadListing onAddListing={onAddListing} ownerWhatsApp={ownerWhatsApp} />
+      <ListingManager listings={listings} onUpdateListingStatus={onUpdateListingStatus} />
       <div className="portalGrid">
         <section className="detailPanel">
           <p className="eyebrow">Agent and landlord portal</p>
@@ -752,18 +829,30 @@ function DashboardOverview({
 }
 
 function PrivateImageVault() {
-  const [privateImages, setPrivateImages] = useState<string[]>([]);
+  const [privateImages, setPrivateImages] = useState<string[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
 
-  function handlePrivateImages(files: FileList | null) {
+    try {
+      return JSON.parse(localStorage.getItem(PRIVATE_IMAGES_KEY) ?? "[]") as string[];
+    } catch {
+      return [];
+    }
+  });
+
+  async function handlePrivateImages(files: FileList | null) {
     if (!files) {
       return;
     }
 
-    setPrivateImages((current) => [
-      ...Array.from(files).map((file) => URL.createObjectURL(file)),
-      ...current
-    ]);
+    const images = await readFilesAsDataUrls(files);
+    setPrivateImages((current) => [...images, ...current]);
   }
+
+  useEffect(() => {
+    localStorage.setItem(PRIVATE_IMAGES_KEY, JSON.stringify(privateImages));
+  }, [privateImages]);
 
   return (
     <section className="privateVault">
@@ -800,6 +889,44 @@ function PrivateImageVault() {
   );
 }
 
+function ListingManager({
+  listings,
+  onUpdateListingStatus
+}: {
+  listings: Listing[];
+  onUpdateListingStatus: (id: number, status: Listing["status"]) => void;
+}) {
+  return (
+    <section className="managerPanel">
+      <div>
+        <p className="eyebrow">House status control</p>
+        <h2>Mark listings as available, booked, or occupied.</h2>
+      </div>
+      <div className="managerList">
+        {listings.map((listing) => (
+          <article className="managerItem" key={listing.id}>
+            <img src={listing.image} alt={listing.title} />
+            <div>
+              <strong>{listing.title}</strong>
+              <span>{listing.area} - ${listing.price}/mo - agency ${listing.agency}</span>
+            </div>
+            <select
+              value={listing.status}
+              onChange={(event) =>
+                onUpdateListingStatus(listing.id, event.target.value as Listing["status"])
+              }
+            >
+              <option value="available">Available</option>
+              <option value="booked">Booked</option>
+              <option value="occupied">Occupied</option>
+            </select>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function UploadListing({
   onAddListing,
   ownerWhatsApp
@@ -811,17 +938,19 @@ function UploadListing({
   const [area, setArea] = useState("Remera");
   const [address, setAddress] = useState("KG 18 Avenue");
   const [price, setPrice] = useState(450);
+  const [agency, setAgency] = useState(0);
   const [rooms, setRooms] = useState(2);
+  const [status, setStatus] = useState<Listing["status"]>("available");
   const [phone, setPhone] = useState(ownerWhatsApp);
   const [agent, setAgent] = useState("My Agency");
   const [photos, setPhotos] = useState<string[]>([]);
 
-  function handlePhotos(files: FileList | null) {
+  async function handlePhotos(files: FileList | null) {
     if (!files) {
       return;
     }
 
-    setPhotos(Array.from(files).map((file) => URL.createObjectURL(file)));
+    setPhotos(await readFilesAsDataUrls(files));
   }
 
   function publishListing() {
@@ -836,7 +965,7 @@ function UploadListing({
       address,
       price,
       deposit: price,
-      agency: 0,
+      agency,
       utilities: 40,
       rooms,
       lifestyle: "New listing",
@@ -853,7 +982,8 @@ function UploadListing({
       rating: 4.6,
       response: "new",
       distance: "Add nearby schools, shops, and transport",
-      views: 0
+      views: 0,
+      status
     });
   }
 
@@ -894,6 +1024,15 @@ function UploadListing({
           />
         </label>
         <label>
+          Agency fee
+          <input
+            type="number"
+            value={agency}
+            min="0"
+            onChange={(event) => setAgency(Number(event.target.value))}
+          />
+        </label>
+        <label>
           Rooms
           <input
             type="number"
@@ -901,6 +1040,17 @@ function UploadListing({
             min="1"
             onChange={(event) => setRooms(Number(event.target.value))}
           />
+        </label>
+        <label>
+          House status
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value as Listing["status"])}
+          >
+            <option value="available">Available</option>
+            <option value="booked">Booked</option>
+            <option value="occupied">Occupied</option>
+          </select>
         </label>
         <label>
           Landlord WhatsApp
@@ -929,6 +1079,20 @@ function UploadListing({
         Publish house
       </button>
     </section>
+  );
+}
+
+function readFilesAsDataUrls(files: FileList): Promise<string[]> {
+  return Promise.all(
+    Array.from(files).map(
+      (file) =>
+        new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })
+    )
   );
 }
 
